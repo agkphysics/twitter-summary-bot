@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: An AWS Serverless Specification template describing your function.
+Resources:
+  GPTBotWebhookResponse:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: webhook.lambda_handler
+      Runtime: python3.9
+      CodeUri: ./src
+      Description: GPT Twitter bot webhook responder
+      MemorySize: 128
+      Timeout: 30
+      Environment:
+        Variables:
+          BOT_USER_ID: !Ref BotUserId
+          LOG_LEVEL: !Ref LogLevel
+      Layers:
+        - arn:aws:lambda:ap-southeast-2:017000801446:layer:AWSLambdaPowertoolsPythonV2:19
+      Events:
+        WebhookCRCEvent:
+          Type: HttpApi
+          Properties:
+            Path: /webhooks/twitter
+            Method: get
+        WebhookDataEvent:
+          Type: HttpApi
+          Properties:
+            Path: /webhooks/twitter
+            Method: post
+Parameters:
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+      - CRITICAL
+    Description: The log level to use for the function.
+  BotUserId:
+    Type: String
+    Default: '1618874467924729856'
+    Description: The Twitter ID of the bot user.

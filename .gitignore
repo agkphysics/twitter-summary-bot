@@ -1,0 +1,5 @@
+.aws-sam/
+.vscode/
+/test_events/
+node_modules/
+.venv/
