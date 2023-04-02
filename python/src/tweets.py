@@ -1,6 +1,7 @@
 import datetime
 import time
-from typing import Optional
+from collections import defaultdict
+from typing import Any, Optional
 
 import openai
 import tweepy
@@ -28,23 +29,89 @@ tw_client = tweepy.Client(
 )
 
 
-def get_conversation_id(tweet_id: str) -> Optional[str]:
-    """Get the conversation ID of a tweet.
+def build_tweet_tree(parents: dict[int, int]) -> dict[int, list[int]]:
+    """Build a tree of tweets.
 
     Args
     ----
-    tweet_id: str
-        The ID of the tweet to get the conversation ID of.
+    parents: dict[int, int]
+        A dictionary mapping tweet IDs to their parent IDs.
+
+    Returns
+    -------
+    dict[int, list[int]]
+        A dictionary mapping tweet IDs to a list of their children.
+    """
+
+    tree = defaultdict(list)
+    for child, parent in parents.items():
+        tree[parent].append(child)
+    return tree
+
+
+def enumerate_tweet_tree(tree: dict[int, list[int]], root: int) -> list[int]:
+    """Enumerate a tree of tweets.
+
+    Args
+    ----
+    tree: dict[int, list[int]]
+        A dictionary mapping tweet IDs to a list of their children.
+    root: int
+        The ID of the root tweet.
+
+    Returns
+    -------
+    list[int]
+        A list of tweet IDs in the order they should be replied to.
+    """
+
+    if root not in tree:
+        return [root]
+    return [root] + [
+        child
+        for child in sorted(tree[root])
+        for child in enumerate_tweet_tree(tree, child)
+    ]
+
+
+def get_parent(tweet: dict[str, Any]) -> Optional[int]:
+    """Get the parent of a tweet.
+
+    Args
+    ----
+    tweet: dict[str, Any]
+        The tweet to get the parent of.
 
     Returns
     -------
     Optional[str]
+        The ID of the parent tweet, or None if the tweet doesn't have a parent.
+    """
+
+    if "referenced_tweets" in tweet:
+        for ref in tweet["referenced_tweets"]:
+            if ref["type"] == "replied_to":
+                return int(ref["id"])
+    return None
+
+
+def get_conversation_id(tweet_id: int) -> Optional[int]:
+    """Get the conversation ID of a tweet.
+
+    Args
+    ----
+    tweet_id: int
+        The ID of the tweet to get the conversation ID of.
+
+    Returns
+    -------
+    Optional[int]
         The conversation ID of the tweet, or None if the tweet doesn't exist.
     """
 
     resp = tw_client.get_tweet(
         tweet_id,
-        tweet_fields=["conversation_id", "author_id", "referenced_tweets"],
+        tweet_fields=["conversation_id", "referenced_tweets"],
         expansions=["referenced_tweets.id"],
     )
     tweet: tweepy.Tweet = resp.data
@@ -65,7 +132,7 @@ def get_conversation_id(tweet_id: str) -> Optional[str]:
     return tweet.conversation_id
 
 
-def get_author_id(tweet_id: str) -> Optional[str]:
+def get_start_tweet(tweet_id: int) -> tuple[Optional[int], str]:
     """Get the author ID of a tweet.
 
     Args
@@ -81,17 +148,17 @@ def get_author_id(tweet_id: str) -> Optional[str]:
     resp = tw_client.get_tweet(tweet_id, tweet_fields=["author_id"])
     tweet: tweepy.Tweet = resp.data
     logger.debug("Thread start tweet: %s", tweet)
-    return tweet.author_id
+    return tweet.author_id, tweet.text
 
 
-def get_conversation_tweets(conv_id: str, author_id: str) -> tweepy.Response:
+def get_conversation_tweets(conv_id: int, author_id: int) -> tweepy.Response:
     """Get the tweets in a conversation.
 
     Args
     ----
-    conv_id: str
+    conv_id: int
         The ID of the conversation to get the tweets of.
-    author_id: str
+    author_id: int
         The ID of the author of the conversation.
 
     Returns
@@ -104,33 +171,28 @@ def get_conversation_tweets(conv_id: str, author_id: str) -> tweepy.Response:
     end_time = curr_time - datetime.timedelta(seconds=10)
     end_time_str = end_time.isoformat("T", timespec="seconds") + "Z"
 
-    resp = tw_client.search_recent_tweets(
-        f"from:{author_id} to:{author_id} conversation_id:{conv_id}",
-        max_results=100,
-        tweet_fields=["referenced_tweets"],
-        expansions=["referenced_tweets.id"],
-        end_time=end_time_str,
-    )
-    while resp.meta["result_count"] == 0:
-        time.sleep(3)  # Wait for API to catch up
-        resp = tw_client.search_recent_tweets(
+    def _get_tweets() -> tweepy.Response:
+        return tw_client.search_recent_tweets(
             f"from:{author_id} to:{author_id} conversation_id:{conv_id}",
             max_results=100,
-            tweet_fields=["referenced_tweets"],
+            tweet_fields=["referenced_tweets", "conversation_id", "author_id"],
             expansions=["referenced_tweets.id"],
             end_time=end_time_str,
         )
+
+    while (resp := _get_tweets()).meta["result_count"] == 0:
+        time.sleep(3)  # Wait for API to catch up
     return resp
 
 
-def get_tweet_thread(conv_id: str, tagging_id: str) -> Optional[str]:
+def get_tweet_thread(conv_id: int, tagging_id: int) -> Optional[list[str]]:
     """Get the thread of a tweet.
 
     Args
     ----
-    conv_id: str
+    conv_id: int
         The ID of the conversation to get the thread of.
-    tagging_id: str
+    tagging_id: int
         The ID of the tweet that tagged the bot.
 
     Returns
@@ -139,7 +201,7 @@ def get_tweet_thread(conv_id: str, tagging_id: str) -> Optional[str]:
         The thread of the tweet, or None if the tweet doesn't exist.
     """
 
-    author_id = get_author_id(conv_id)
+    author_id, text = get_start_tweet(conv_id)
     if author_id is None:
         return None
 
@@ -148,26 +210,27 @@ def get_tweet_thread(conv_id: str, tagging_id: str) -> Optional[str]:
         return None
     logger.debug("Tweet thread data: %s", data.data)
 
-    tweets = {x.id: x.text for x in data.includes["tweets"]}
-    tweets[data.data[0].id] = data.data[0].text
-    parents = {
-        x.id: next((y.id for y in x.referenced_tweets if y.type == "replied_to"), None)
-        for x in data.data
-    }
-    conversation = [data.data[0].id]
-    while conversation[-1] in parents and parents[conversation[-1]] is not None:
-        conversation.append(parents[conversation[-1]])
-    # Check whether the original tweet is present
-    if conv_id not in conversation:
-        conversation.append(conv_id)
+    # Need to get the included tweets, since sometimes the API doesn't return all
+    # the tweets
+    tweets: dict[int, str] = {conv_id: text}
+    parents: dict[int, int] = {}
+    for tweet in data.includes["tweets"] + data.data:
+        if tweet.author_id == author_id and tweet.conversation_id == conv_id:
+            tweets[tweet.id] = tweet.text
+        if (p := get_parent(tweet)) is not None:
+            parents[tweet.id] = p
+
+    tree = build_tweet_tree(parents)
+    logger.debug("Tweet tree: %s", tree)
+
     # We need to ignore the tagging tweet, in case we're tagged by the thread author.
-    conversation = [tweets[x] for x in reversed(conversation) if x != tagging_id]
+    conversation = [
+        tweets[x] for x in enumerate_tweet_tree(tree, conv_id) if x != tagging_id
+    ]
+    return conversation
 
-    thread = "\n".join(conversation)
-    return thread
 
-
-def get_gpt_summary(thread: str) -> str:
+def get_gpt_summary(thread: list[str]) -> str:
     """Get a summary of a thread using GPT-3.
 
     Args
@@ -180,13 +243,18 @@ def get_gpt_summary(thread: str) -> str:
     str
         The summary of the thread.
     """
+    prompt = "<tweet>" + "</tweet><tweet>".join(thread) + "</tweet>"
+    prompt = (
+        f"{prompt}\nSummarize the above into a single 280 character Tweet:\n<tweet>"
+    )
     try:
         summary = (
             openai.Completion.create(
                 model="text-davinci-003",
-                prompt=f"{thread}\n\nSummarize the above into a single 280 character Tweet:",  # noqa: E501
+                prompt=prompt,
                 temperature=0.7,
                 max_tokens=70,
+                stop="</tweet>",
             )
             .choices[0]
             .text.strip()
@@ -227,7 +295,7 @@ def limit_summary(summary: str) -> str:
     return summary
 
 
-def get_conversation_summary(tweet_id: str) -> Optional[str]:
+def get_conversation_summary(tweet_id: int) -> Optional[str]:
     conv_id = get_conversation_id(tweet_id)
     if conv_id is None:
         return None
@@ -244,5 +312,5 @@ def get_conversation_summary(tweet_id: str) -> Optional[str]:
     return summary
 
 
-def reply_to_user(tweet_id: str, summary: str):
+def reply_to_user(tweet_id: int, summary: str):
     tw_client.create_tweet(text=summary, in_reply_to_tweet_id=tweet_id)

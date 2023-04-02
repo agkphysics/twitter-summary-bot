@@ -58,7 +58,7 @@ def webhook_data() -> dict[str, Any]:
         logger.info("No tweet_create_events in data")
         return {}
     for tweet in data["tweet_create_events"]:
-        tweet_id = tweet["id_str"]
+        tweet_id = int(tweet["id_str"])
         for mention in tweet["entities"]["user_mentions"]:
             if mention["id_str"] == BOT_USER_ID:
                 summary = get_conversation_summary(tweet_id)
