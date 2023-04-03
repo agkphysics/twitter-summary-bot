@@ -1,7 +1,6 @@
-import datetime
 import time
-from collections import defaultdict
-from typing import Any, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import openai
 import tweepy
@@ -15,6 +14,7 @@ from keys import (
     OAUTH1_BOT_TOKEN_SECRET,
     OPENAI_API_KEY,
 )
+from utils import build_tweet_tree, enumerate_tweet_tree, get_parent
 
 openai.api_key = OPENAI_API_KEY
 
@@ -29,79 +29,13 @@ tw_client = tweepy.Client(
 )
 
 
-def build_tweet_tree(parents: dict[int, int]) -> dict[int, list[int]]:
-    """Build a tree of tweets.
-
-    Args
-    ----
-    parents: dict[int, int]
-        A dictionary mapping tweet IDs to their parent IDs.
-
-    Returns
-    -------
-    dict[int, list[int]]
-        A dictionary mapping tweet IDs to a list of their children.
-    """
-
-    tree = defaultdict(list)
-    for child, parent in parents.items():
-        tree[parent].append(child)
-    return tree
-
-
-def enumerate_tweet_tree(tree: dict[int, list[int]], root: int) -> list[int]:
-    """Enumerate a tree of tweets.
-
-    Args
-    ----
-    tree: dict[int, list[int]]
-        A dictionary mapping tweet IDs to a list of their children.
-    root: int
-        The ID of the root tweet.
-
-    Returns
-    -------
-    list[int]
-        A list of tweet IDs in the order they should be replied to.
-    """
-
-    if root not in tree:
-        return [root]
-    return [root] + [
-        child
-        for child in sorted(tree[root])
-        for child in enumerate_tweet_tree(tree, child)
-    ]
-
-
-def get_parent(tweet: dict[str, Any]) -> Optional[int]:
-    """Get the parent of a tweet.
-
-    Args
-    ----
-    tweet: dict[str, Any]
-        The tweet to get the parent of.
-
-    Returns
-    -------
-    Optional[str]
-        The ID of the parent tweet, or None if the tweet doesn't have a parent.
-    """
-
-    if "referenced_tweets" in tweet:
-        for ref in tweet["referenced_tweets"]:
-            if ref["type"] == "replied_to":
-                return int(ref["id"])
-    return None
-
-
 def get_conversation_id(tweet_id: int) -> Optional[int]:
-    """Get the conversation ID of a tweet.
+    """Get the conversation ID of the tagging tweet.
 
     Args
     ----
     tweet_id: int
-        The ID of the tweet to get the conversation ID of.
+        The ID of the tagging tweet.
 
     Returns
     -------
@@ -119,7 +53,7 @@ def get_conversation_id(tweet_id: int) -> Optional[int]:
 
     if resp.errors:
         for error in resp.errors:
-            logger.error("[ERROR] %s: %s", error["title"], error["detail"])
+            logger.error("API Error: %s: %s", error["title"], error["detail"])
         return None
 
     if tweet.referenced_tweets:
@@ -145,9 +79,12 @@ def get_start_tweet(tweet_id: int) -> tuple[Optional[int], str]:
     Optional[str]
         The author ID of the tweet, or None if the tweet doesn't exist.
     """
-    resp = tw_client.get_tweet(tweet_id, tweet_fields=["author_id"])
+    resp = tw_client.get_tweet(tweet_id, tweet_fields=["author_id,created_at"])
     tweet: tweepy.Tweet = resp.data
     logger.debug("Thread start tweet: %s", tweet)
+    if tweet.created_at < datetime.now(timezone.utc) - timedelta(days=7):
+        logger.info("Tweet is older than 7 days, ignoring")
+        return None, ""
     return tweet.author_id, tweet.text
 
 
@@ -167,8 +104,7 @@ def get_conversation_tweets(conv_id: int, author_id: int) -> tweepy.Response:
         The response from the Twitter API.
     """
 
-    curr_time = datetime.datetime.utcnow()
-    end_time = curr_time - datetime.timedelta(seconds=10)
+    end_time = datetime.utcnow() - timedelta(seconds=10)
     end_time_str = end_time.isoformat("T", timespec="seconds") + "Z"
 
     def _get_tweets() -> tweepy.Response:
@@ -282,16 +218,16 @@ def limit_summary(summary: str) -> str:
     str
         The summary, constrained to 280 characters.
     """
-    summary.replace("@GPTSummary", "GPTSummary")
-    if len(summary) > 280:
-        cur_len = len(summary)
-        removed = 0
-        words = summary.split()
-        for i in range(len(words) - 1, 0, -1):
-            removed += len(words[i]) + 1
-            if cur_len - removed <= 280:
-                summary = " ".join(words[:i])[:280]
-                break
+    if len(summary) <= 280:
+        return summary
+
+    removed = 0
+    words = summary.split()
+    for i in range(len(words) - 1, 0, -1):
+        removed += len(words[i]) + 1
+        if len(summary) - removed <= 280:
+            summary = " ".join(words[:i])[:280]
+            break
     return summary
 
 
@@ -312,5 +248,5 @@ def get_conversation_summary(tweet_id: int) -> Optional[str]:
     return summary
 
 
-def reply_to_user(tweet_id: int, summary: str):
+def reply_to_tweet(tweet_id: int, summary: str):
     tw_client.create_tweet(text=summary, in_reply_to_tweet_id=tweet_id)

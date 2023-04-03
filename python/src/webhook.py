@@ -11,12 +11,12 @@ from aws_lambda_powertools.event_handler.exceptions import (
 from aws_lambda_powertools.logging import Logger, correlation_paths
 
 from keys import CONSUMER_SECRET
-from tweets import get_conversation_summary, reply_to_user
+from tweets import get_conversation_summary, reply_to_tweet
 
 app = APIGatewayHttpResolver()
 logger = Logger(service="twitter-webhook", level=os.environ.get("LOG_LEVEL", "INFO"))
 
-BOT_USER_ID = os.environ["BOT_USER_ID"]
+BOT_USER_ID = int(os.environ["BOT_USER_ID"])
 
 
 @app.get("/webhooks/twitter")
@@ -41,12 +41,12 @@ def webhook_challenge():
         raise BadRequestError("crc_token not found")
     crc_token = app.current_event.query_string_parameters["crc_token"]
 
-    # creates HMAC SHA-256 hash from incomming token and your consumer secret
+    # Creates HMAC SHA-256 hash from incomming token and your consumer secret
     hash = hmac.digest(
         CONSUMER_SECRET.encode("utf-8"), crc_token.encode("utf-8"), "sha256"
     )
 
-    # construct response data with base64 encoded hash
+    # Construct response data with base64 encoded hash
     response = {"response_token": "sha256=" + base64.b64encode(hash).decode("utf-8")}
     return response
 
@@ -58,15 +58,24 @@ def webhook_data() -> dict[str, Any]:
         logger.info("No tweet_create_events in data")
         return {}
     for tweet in data["tweet_create_events"]:
+        if not (
+            "in_reply_to_status_id_str" in tweet or "quoted_status_id_str" in tweet
+        ):
+            logger.info("Tweet is neither a reply nor a quote tweet")
+            continue
+        if int(tweet["user"]["id_str"]) == BOT_USER_ID:
+            logger.info("Tweet from bot")
+            continue
         tweet_id = int(tweet["id_str"])
         for mention in tweet["entities"]["user_mentions"]:
-            if mention["id_str"] == BOT_USER_ID:
-                summary = get_conversation_summary(tweet_id)
-                if summary is None:
-                    logger.error("Could not get summary for tweet %s", tweet_id)
-                else:
-                    reply_to_user(tweet_id, summary)
-                break
+            if int(mention["id_str"]) != BOT_USER_ID:
+                continue
+            summary = get_conversation_summary(tweet_id)
+            if summary is None:
+                logger.error("Could not get summary for tweet %s", tweet_id)
+            else:
+                reply_to_tweet(tweet_id, summary)
+            break  # Only reply once
         else:
             logger.info("No mention of bot in tweet")
     return {}
