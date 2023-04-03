@@ -1,25 +1,18 @@
 version = 0.1
 
-[python.build.parameters]
-template = "python/template.yaml"
-[python.deploy.parameters]
+[default.deploy.parameters]
 stack_name = "gpt-bot"
 s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1vh5n06om7r82"
 s3_prefix = "gpt-bot"
 region = "ap-southeast-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-[python.local_invoke.parameters]
+[default.local_invoke.parameters]
 container_host_interface = "0.0.0.0"
+parameter_overrides = "LogLevel=DEBUG Debug=1"
+
+[python.build.parameters]
+template = "python/template.yaml"
 
 [nodejs.build.parameters]
 template = "nodejs/template.yaml"
-[nodejs.deploy.parameters]
-stack_name = "gpt-bot"
-s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1vh5n06om7r82"
-s3_prefix = "gpt-bot"
-region = "ap-southeast-2"
-confirm_changeset = true
-capabilities = "CAPABILITY_IAM"
-[nodejs.local_invoke.parameters]
-container_host_interface = "0.0.0.0"

@@ -1,6 +1,6 @@
+import os
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 import openai
 import tweepy
@@ -29,7 +29,13 @@ tw_client = tweepy.Client(
 )
 
 
-def get_conversation_id(tweet_id: int) -> Optional[int]:
+class TweetTooOldError(Exception):
+    """Exception raised when a tweet is too old to be replied to."""
+
+    pass
+
+
+def get_conversation_id(tweet_id: int) -> int:
     """Get the conversation ID of the tagging tweet.
 
     Args
@@ -51,11 +57,6 @@ def get_conversation_id(tweet_id: int) -> Optional[int]:
     tweet: tweepy.Tweet = resp.data
     logger.debug("Tagging tweet: %s", tweet)
 
-    if resp.errors:
-        for error in resp.errors:
-            logger.error("API Error: %s: %s", error["title"], error["detail"])
-        return None
-
     if tweet.referenced_tweets:
         for ref in tweet.referenced_tweets:
             if ref.type == "quoted":  # Tagging tweet is a quote tweet
@@ -66,7 +67,7 @@ def get_conversation_id(tweet_id: int) -> Optional[int]:
     return tweet.conversation_id
 
 
-def get_start_tweet(tweet_id: int) -> tuple[Optional[int], str]:
+def get_start_tweet(tweet_id: int) -> tuple[int, str]:
     """Get the author ID of a tweet.
 
     Args
@@ -83,8 +84,7 @@ def get_start_tweet(tweet_id: int) -> tuple[Optional[int], str]:
     tweet: tweepy.Tweet = resp.data
     logger.debug("Thread start tweet: %s", tweet)
     if tweet.created_at < datetime.now(timezone.utc) - timedelta(days=7):
-        logger.info("Tweet is older than 7 days, ignoring")
-        return None, ""
+        raise TweetTooOldError("Tweet is older than 7 days")
     return tweet.author_id, tweet.text
 
 
@@ -121,7 +121,7 @@ def get_conversation_tweets(conv_id: int, author_id: int) -> tweepy.Response:
     return resp
 
 
-def get_tweet_thread(conv_id: int, tagging_id: int) -> Optional[list[str]]:
+def get_tweet_thread(conv_id: int, tagging_id: int) -> list[str]:
     """Get the thread of a tweet.
 
     Args
@@ -138,12 +138,7 @@ def get_tweet_thread(conv_id: int, tagging_id: int) -> Optional[list[str]]:
     """
 
     author_id, text = get_start_tweet(conv_id)
-    if author_id is None:
-        return None
-
     data = get_conversation_tweets(conv_id, author_id)
-    if data is None:
-        return None
     logger.debug("Tweet thread data: %s", data.data)
 
     # Need to get the included tweets, since sometimes the API doesn't return all
@@ -183,25 +178,17 @@ def get_gpt_summary(thread: list[str]) -> str:
     prompt = (
         f"{prompt}\nSummarize the above into a single 280 character Tweet:\n<tweet>"
     )
-    try:
-        summary = (
-            openai.Completion.create(
-                model="text-davinci-003",
-                prompt=prompt,
-                temperature=0.7,
-                max_tokens=70,
-                stop="</tweet>",
-            )
-            .choices[0]
-            .text.strip()
+    summary = (
+        openai.Completion.create(
+            model="text-davinci-003",
+            prompt=prompt,
+            temperature=0.7,
+            max_tokens=70,
+            stop="</tweet>",
         )
-    except openai.OpenAIError as e:
-        logger.error(
-            "OpenAI request returned status %d with error: %s",
-            e.http_status,
-            e.user_message,
-        )
-        return ""
+        .choices[0]
+        .text.strip()
+    )
     return summary
 
 
@@ -231,17 +218,11 @@ def limit_summary(summary: str) -> str:
     return summary
 
 
-def get_conversation_summary(tweet_id: int) -> Optional[str]:
+def get_conversation_summary(tweet_id: int) -> str:
     conv_id = get_conversation_id(tweet_id)
-    if conv_id is None:
-        return None
     thread = get_tweet_thread(conv_id, tweet_id)
-    if thread is None:
-        return None
     logger.info(f"Thread:\n\n{thread}")
     summary = get_gpt_summary(thread)
-    if not summary:
-        return None
     logger.info(f"GPT summary:\n\n{summary}")
     summary = limit_summary(summary)
     logger.info(f"Reponse tweet:\n\n{summary}")
@@ -249,4 +230,7 @@ def get_conversation_summary(tweet_id: int) -> Optional[str]:
 
 
 def reply_to_tweet(tweet_id: int, summary: str):
+    if os.environ.get("DEBUG", "0") == "1":
+        logger.info(f"Would have replied to tweet {tweet_id} with {summary}")
+        return
     tw_client.create_tweet(text=summary, in_reply_to_tweet_id=tweet_id)
