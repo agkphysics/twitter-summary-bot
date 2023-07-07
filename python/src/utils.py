@@ -23,7 +23,9 @@ def build_tweet_tree(parents: dict[int, int]) -> dict[int, list[int]]:
 
 
 def enumerate_tweet_tree(tree: dict[int, list[int]], root: int) -> list[int]:
-    """Enumerate a tree of tweets.
+    """Enumerate a tree of tweets. This automatically ignores
+    disconnected tweets (which might occur if the author replies to
+    themself as a reply to someone else).
 
     Args
     ----

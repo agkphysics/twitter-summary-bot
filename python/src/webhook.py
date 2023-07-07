@@ -11,7 +11,7 @@ from aws_lambda_powertools.event_handler.exceptions import (
 from aws_lambda_powertools.logging import Logger, correlation_paths
 
 from keys import CONSUMER_SECRET
-from tweets import TweetTooOldError, get_conversation_summary, reply_to_tweet
+from tweets import TweetHandler
 
 app = APIGatewayHttpResolver()
 logger = Logger(service="twitter-webhook", level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -66,24 +66,19 @@ def webhook_data() -> dict[str, Any]:
         if int(tweet["user"]["id_str"]) == BOT_USER_ID:
             logger.info("Tweet from bot")
             continue
-        tweet_id = int(tweet["id_str"])
-        for mention in tweet["entities"]["user_mentions"]:
-            if int(mention["id_str"]) != BOT_USER_ID:
-                continue
-            try:
-                summary = get_conversation_summary(tweet_id)
-            except TweetTooOldError:
-                logger.info("Tweet is too old to reply to")
-                reply_to_tweet(
-                    tweet_id, "I'm sorry but I can't reply to tweets older than 7 days"
-                )
-            except Exception as e:
-                logger.exception(e)
-            else:
-                reply_to_tweet(tweet_id, summary)
-            break  # Only reply once
-        else:
+        if "user_mentions" not in tweet["entities"]:
+            logger.info("No user_mentions in tweet")
+            continue
+        mention = next(
+            (x for x in tweet["entities"]["user_mentions"] if x["id"] == BOT_USER_ID),
+            None,
+        )
+        if mention is None:
             logger.info("No mention of bot in tweet")
+            continue
+
+        result = TweetHandler(tweet).handle()
+        logger.info("Success" if result else "Failure")
     return {}
 
 
